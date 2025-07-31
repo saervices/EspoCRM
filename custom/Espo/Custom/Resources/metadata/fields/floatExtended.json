@@ -74,6 +74,7 @@
                 "label-info",
                 "label-dark"
             ],
+            "default": "label-dark",
             "translated": true
         },
         {
@@ -92,6 +93,7 @@
                 "label-info",
                 "label-dark"
             ],
+            "default": "label-dark",
             "translated": true
         },
         {
@@ -106,6 +108,7 @@
                 "label-info",
                 "label-dark"
             ],
+            "default": "label-dark",
             "translated": true
         },
         {
@@ -128,6 +131,7 @@
                 "text-danger",
                 "text-dark"
             ],
+            "default": "text-dark",
             "translated": true
         },
         {
@@ -146,6 +150,7 @@
                 "text-danger",
                 "text-dark"
             ],
+            "default": "text-dark",
             "translated": true
         },
         {
@@ -160,6 +165,7 @@
                 "text-danger",
                 "text-dark"
             ],
+            "default": "text-dark",
             "translated": true
         }
     ],
