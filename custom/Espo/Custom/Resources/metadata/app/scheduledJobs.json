@@ -1,0 +1,5 @@
+{
+    "RecalculateFormulas": {
+        "jobClassName": "Espo\\Custom\\Jobs\\RecalculateFormulas"
+    }
+}
