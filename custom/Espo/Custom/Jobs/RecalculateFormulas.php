@@ -5,103 +5,182 @@ namespace Espo\Custom\Jobs;
 use Espo\Core\Job\JobDataLess;
 use Espo\Core\ORM\EntityManager;
 use Espo\Core\ORM\Repository\Option\SaveOption;
+use Espo\Core\Utils\Config;
 use Espo\Core\Utils\Log;
+use RuntimeException;
 use Throwable;
 
 /**
- * Job that iterates records (in batches) and saves them to force formula recalculation.
- * Uses "id > lastId" pagination (no offset()).
+ * Re-saves configured entities to force formula recalculation.
  */
 class RecalculateFormulas implements JobDataLess
 {
-    protected EntityManager $entityManager;
-    protected ?Log $log = null;
+    private const CONFIG_KEY_ENTITY_TYPES = 'jobRecalculateFormulasEntityTypes';
+    private const CONFIG_KEY_BATCH_SIZE = 'jobRecalculateFormulasBatchSize';
+    private const DEFAULT_ENTITY_TYPES = [
+        'CCustomer',
+        'CCompany',
+        'CContract',
+    ];
+    private const DEFAULT_BATCH_SIZE = 200;
 
-    // --- CONFIG ---
-    private const ENABLE_LOGGING = true;    // set to false to disable logging
-    private const BATCH_SIZE = 200;         // adjust if DB/memory is under load
-
-    private int $errorCount = 0;
-
-    public function __construct(EntityManager $entityManager, ?Log $log = null)
-    {
-        $this->entityManager = $entityManager;
-        $this->log = (self::ENABLE_LOGGING && $log !== null) ? $log : null;
-    }
+    public function __construct(
+        private EntityManager $entityManager,
+        private Log $log,
+        private Config $config,
+    ) {}
 
     public function run(): void
     {
-        // --- CONFIG: change this to the entity types you want to recalc ---
-        $entityTypes = [
-            'CCustomer',
-            'CCompany',
-            'CContract'
-            // add others as needed
-        ];
+        $entityTypeList = $this->getEntityTypeList();
+        $batchSize = $this->getBatchSize();
 
-        foreach ($entityTypes as $entityType) {
-            $this->logInfo("Processing entity type '{$entityType}'");
+        if ($entityTypeList === []) {
+            $this->log->warning('Job RecalculateFormulas: No entity types configured, skipping.');
 
-            $repo = $this->entityManager->getRDBRepository($entityType);
+            return;
+        }
 
-            $lastId = null;
-            $totalProcessed = 0;
+        $startedAt = microtime(true);
+        $totalProcessed = 0;
+        $totalErrors = 0;
 
-            while (true) {
-                $qb = $repo->where([])->order('id'); // stable ordering
+        foreach ($entityTypeList as $entityType) {
+            if (!$this->entityManager->hasRepository($entityType)) {
+                $this->log->warning(
+                    sprintf('Job RecalculateFormulas: Repository for "%s" not found, skipping.', $entityType)
+                );
 
-                if ($lastId !== null) {
-                    $qb->where(['id>' => $lastId]);
+                continue;
+            }
+
+            [$processed, $errors] = $this->processEntityType($entityType, $batchSize);
+
+            $totalProcessed += $processed;
+            $totalErrors += $errors;
+        }
+
+        $duration = microtime(true) - $startedAt;
+
+        $this->log->info(
+            sprintf(
+                'Job RecalculateFormulas: Finished, %d record(s) processed in %.2f second(s).',
+                $totalProcessed,
+                $duration
+            )
+        );
+
+        if ($totalErrors > 0) {
+            throw new RuntimeException(
+                sprintf('Job RecalculateFormulas finished with %d error(s). See log for details.', $totalErrors)
+            );
+        }
+    }
+
+    /**
+     * @return array{int, int} [processed, errors]
+     */
+    private function processEntityType(string $entityType, int $batchSize): array
+    {
+        $repository = $this->entityManager->getRDBRepository($entityType);
+        $lastId = null;
+        $processed = 0;
+        $errors = 0;
+
+        $this->log->info(
+            sprintf('Job RecalculateFormulas: Processing entity "%s" with batch size %d.', $entityType, $batchSize)
+        );
+
+        while (true) {
+            $builder = $repository->order('id')->limit(null, $batchSize);
+
+            if ($lastId !== null) {
+                $builder = $builder->where(['id>' => $lastId]);
+            }
+
+            $collection = $builder->find();
+
+            if (count($collection) === 0) {
+                break;
+            }
+
+            foreach ($collection as $entity) {
+                $entityId = $entity->get('id');
+
+                if (!is_string($entityId) || $entityId === '') {
+                    $this->log->warning(
+                        sprintf('Job RecalculateFormulas: %s record without ID skipped.', $entityType)
+                    );
+
+                    continue;
                 }
 
-                $collection = $qb->limit(self::BATCH_SIZE)->find();
+                $lastId = $entityId;
 
-                if (count($collection) === 0) {
-                    $this->logInfo("Finished '{$entityType}', total {$totalProcessed} entities processed.");
-                    break;
+                try {
+                    $this->entityManager->saveEntity($entity, [
+                        SaveOption::SILENT => true,
+                        SaveOption::NO_STREAM => true,
+                        SaveOption::NO_NOTIFICATIONS => true,
+                    ]);
+
+                    $processed++;
+                } catch (Throwable $exception) {
+                    $errors++;
+
+                    $this->log->error(
+                        sprintf(
+                            'Job RecalculateFormulas: Failed to save %s (%s): [%s] %s',
+                            $entityType,
+                            $entityId,
+                            $exception->getCode(),
+                            $exception->getMessage()
+                        )
+                    );
                 }
-
-                foreach ($collection as $entity) {
-                    try {
-                        $lastId = $entity->get('id'); // remember last processed ID
-                        $this->entityManager->saveEntity(
-                            $entity,
-                            [ SaveOption::SILENT => true ] // silent save to avoid triggering user notifications
-                        );
-                        $totalProcessed++;
-                    } catch (Throwable $e) {
-                        $this->errorCount++;
-                        $this->logError("Failed saving {$entityType} ID {$lastId}: " . $e->getMessage());
-                    }
-                }
-
-                gc_collect_cycles(); // keep memory under control
             }
         }
 
-        if ($this->errorCount > 0) {
-            // this makes the error visible in Scheduled Jobs UI
-            throw new \Exception("RecalculateFormulas finished with {$this->errorCount} errors. Check logs for details.");
-        }
+        $this->log->info(
+            sprintf('Job RecalculateFormulas: %s processed (%d record(s)).', $entityType, $processed)
+        );
+
+        return [$processed, $errors];
     }
 
-    private function logInfo(string $message): void
+    private function getEntityTypeList(): array
     {
-        if (!self::ENABLE_LOGGING) {
-            return;
+        $configured = $this->config->get(self::CONFIG_KEY_ENTITY_TYPES, self::DEFAULT_ENTITY_TYPES);
+
+        if (is_string($configured)) {
+            $configured = array_map('trim', explode(',', $configured));
         }
-        $this->log
-            ? $this->log->info("RecalculateFormulas: {$message}")
-            : error_log("[INFO] RecalculateFormulas: {$message}");
+
+        if (!is_array($configured)) {
+            return self::DEFAULT_ENTITY_TYPES;
+        }
+
+        $filtered = array_values(
+            array_filter(
+                array_map(
+                    static fn ($value) => is_string($value) ? trim($value) : '',
+                    $configured
+                ),
+                static fn ($value) => $value !== ''
+            )
+        );
+
+        return $filtered !== [] ? $filtered : self::DEFAULT_ENTITY_TYPES;
     }
 
-    private function logError(string $message): void
+    private function getBatchSize(): int
     {
-        if (!self::ENABLE_LOGGING) {
-            return;
+        $value = $this->config->get(self::CONFIG_KEY_BATCH_SIZE, self::DEFAULT_BATCH_SIZE);
+
+        if (!is_int($value)) {
+            $value = (int) $value;
         }
-        $this->log
-            ? $this->log->error("RecalculateFormulas: {$message}")
-            : error_log("[ERROR] RecalculateFormulas: {$message}");
+
+        return max(1, $value);
     }
 }
