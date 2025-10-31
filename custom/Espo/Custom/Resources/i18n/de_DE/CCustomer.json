@@ -1,0 +1,6 @@
+{
+    "boolFilters": {
+        "customerTrue": "Kunden",
+        "customerFalse": "Personen"
+    }
+}

@@ -1,0 +1,12 @@
+{
+    "boolFilterList": [
+        "onlyMy",
+        "customerTrue",
+        "customerFalse"
+    ],
+    "defaultFilterData": {
+        "bool": {
+            "customerTrue": true
+        }
+    }
+}

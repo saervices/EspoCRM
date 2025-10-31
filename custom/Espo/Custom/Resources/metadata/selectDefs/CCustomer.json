@@ -1,0 +1,6 @@
+{
+  "boolFilterClassNameMap": {
+    "customerTrue": "Espo\\Custom\\Select\\CCustomer\\BoolFilters\\CustomerTrue",
+    "customerFalse": "Espo\\Custom\\Select\\CCustomer\\BoolFilters\\CustomerFalse"
+  }
+}
